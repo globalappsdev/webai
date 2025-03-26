@@ -2,6 +2,7 @@ from flask import Flask, Response, request, jsonify
 from flask_cors import CORS
 import google.generativeai as genai
 import re
+import os
 
 apiKey  = os.getenv("GOOGLE_API_KEY")
 
