@@ -117,8 +117,8 @@ def chatbot_js():
                 typingMessage.style.alignSelf = 'flex-start';
                 messagesDiv.appendChild(typingMessage);
                 messagesDiv.scrollTop = messagesDiv.scrollHeight;
-
-                fetch('http://127.0.0.1:8000/chatbot', {
+    
+                fetch('/chatbot', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json'
@@ -179,4 +179,4 @@ def chatbot():
     return jsonify({"response": bot_response})
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(debug=False, host='0.0.0.0', port=int(os.environ.get("PORT", 8080)))
