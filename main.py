@@ -118,7 +118,7 @@ def chatbot_js():
                 messagesDiv.appendChild(typingMessage);
                 messagesDiv.scrollTop = messagesDiv.scrollHeight;
     
-                fetch('http://webai-production.up.railway.app/chatbot', {
+                fetch('https://webai-production.up.railway.app/chatbot', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json'
