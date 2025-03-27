@@ -246,17 +246,10 @@ def chatbot():
         return jsonify({"response": bot_response})
 
     # Otherwise, use AI
-    response_text = sendtoAi(user_message, user_history)
-    try:
-        response_json = json.loads(response_text)
-        bot_response = response_json["response"]
-        user_history.append({"user": user_message, "bot": bot_response})
-        if len(user_history) > 10:
-            user_history.pop(0)
-    except json.JSONDecodeError as E:
-        print('Error occured at :',E)
-        bot_response = "Sorry, I couldn’t process that. How can I assist you?"
-        user_history.append({"user": user_message, "bot": bot_response})
+    bot_response = sendtoAi(user_message.lower(), user_history)
+    user_history.append({"user": user_message, "bot": bot_response})
+    if len(user_history) > 10:
+        user_history.pop(0)
 
     return jsonify({"response": bot_response})
 
