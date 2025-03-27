@@ -246,7 +246,7 @@ def chatbot():
         return jsonify({"response": bot_response})
 
     # Otherwise, use AI
-    response_text = sendtoAi(API_KEY, user_message, user_history)
+    response_text = sendtoAi(user_message, user_history)
     try:
         response_json = json.loads(response_text)
         bot_response = response_json["response"]
