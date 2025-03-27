@@ -9,8 +9,23 @@ apiKey  = os.getenv("GOOGLE_API_KEY")
 app = Flask(__name__)
 CORS(app)
 
+def get_request_domain():
+    """Extract the domain from Origin or Referer headers."""
+    origin = request.headers.get('Origin')
+    if origin:
+        return origin  # e.g., "https://sunnyshades.com"
+    
+    referer = request.headers.get('Referer')
+    if referer:
+        parsed = urlparse(referer)
+        return f"{parsed.scheme}://{parsed.netloc}"  # e.g., "https://sunnyshades.com"
+    
+    return "Unknown"  # Fallback if neither header is present
+    
 
 def sendtoAi(prompt):
+    domain = get_request_domain()
+    print(f"Request to / from domain: {domain}")
     genai.configure(api_key=apiKey)
     model = genai.GenerativeModel("gemini-1.5-flash")
     response = model.generate_content(prompt)
