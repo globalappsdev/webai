@@ -253,7 +253,8 @@ def chatbot():
         user_history.append({"user": user_message, "bot": bot_response})
         if len(user_history) > 10:
             user_history.pop(0)
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as E:
+        print('Error occured at :',E)
         bot_response = "Sorry, I couldn’t process that. How can I assist you?"
         user_history.append({"user": user_message, "bot": bot_response})
 
