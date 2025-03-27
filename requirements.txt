@@ -2,6 +2,5 @@ Flask
 Flask-CORS
 google-generativeai
 gunicorn
-json
 requests
 uuid
