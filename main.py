@@ -4,6 +4,7 @@ import google.generativeai as genai
 import re
 import os
 import json
+import requests
 import uuid
 
 apiKey  = os.getenv("GOOGLE_API_KEY")
