@@ -3,11 +3,26 @@ from flask_cors import CORS
 import google.generativeai as genai
 import re
 import os
+import json
+import uuid
 
 apiKey  = os.getenv("GOOGLE_API_KEY")
+USER_HISTORIES = {}  # {user_id: [{"user": "...", "bot": "..."}, ...]}
+USER_AGENT_CHATS = {}  # {user_id: {"is_agent_chat": bool, "telegram_chat_id": str}}
+ACTIVE_CHATS = {}
+
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "your_telegram_bot_token")
+TELEGRAM_AGENT_CHAT_ID = os.getenv("TELEGRAM_AGENT_CHAT_ID", "your_agent_chat_id")
 
 app = Flask(__name__)
 CORS(app)
+
+def send_telegram_message(chat_id, text):
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {"chat_id": chat_id, "text": text}
+    response = requests.post(url, json=payload)
+    return response.status_code == 200
+
 
 def get_request_domain():
     """Extract the domain from Origin or Referer headers."""
@@ -23,15 +38,31 @@ def get_request_domain():
     return "Unknown"  # Fallback if neither header is present
     
 
-def sendtoAi(prompt):
-    domain = get_request_domain()
-    print(f"Request to / from domain: {domain}")
+def sendtoAi(prompt, history=None):
+    # Configure Gemini
     genai.configure(api_key=apiKey)
     model = genai.GenerativeModel("gemini-1.5-flash")
-    response = model.generate_content(prompt)
+
+    # Convert business JSON to string
+    business_json_str = json.dumps(BUSINESS_JSON)
+
+    # Handle conversation history (default to empty list if None)
+    history = history or []
+    history_str = json.dumps(history) if history else "[]"
+
+    # Construct the full prompt
+    full_prompt = (
+        f"Business Context: {business_json_str}\n"
+        f"Conversation History: {history_str}\n"
+        f"User Query: \"{prompt}\"\n"
+        "Instructions: Respond to the user's query using the provided business context and history. "
+        
+    )
 
     
+    response = model.generate_content(full_prompt)
 
+    
     return response.text
 
 
@@ -181,17 +212,171 @@ def chatbot_js():
 
 @app.route('/chatbot', methods=['POST'])
 def chatbot():
-    user_message = request.json.get('message', '')
+    data = request.json
+    user_message = data.get('message', '').lower()
+    user_id = data.get('userId', str(uuid.uuid4()))
+    domain = get_request_domain()
+    print(f"Chat request from user {user_id} at domain: {domain} - Message: {user_message}")
 
-    # 🤖 AI Response (Replace this with Google Gemini API)
-    if "hello" in user_message.lower():
-        bot_response = "Hello! How can I assist you today? 😊"
-    elif "bye" in user_message.lower():
-        bot_response = "Goodbye! Have a great day! 👋"
-    else:
-        bot_response = sendtoAi(user_message.lower())
+    # Initialize user history and agent chat state
+    if user_id not in USER_HISTORIES:
+        USER_HISTORIES[user_id] = []
+    if user_id not in USER_AGENT_CHATS:
+        USER_AGENT_CHATS[user_id] = {"is_agent_chat": False, "telegram_chat_id": None}
+    
+    user_history = USER_HISTORIES[user_id]
+    user_agent_chat = USER_AGENT_CHATS[user_id]
+
+    # Check if user wants to chat with agent
+    if "chat with agent" in user_message or "talk to agent" in user_message:
+        user_agent_chat["is_agent_chat"] = True
+        user_agent_chat["telegram_chat_id"] = TELEGRAM_AGENT_CHAT_ID
+        message_to_agent = f"[{user_id}] User requested agent chat: {user_message}"
+        send_telegram_message(TELEGRAM_AGENT_CHAT_ID, message_to_agent)
+        bot_response = "I’ve notified an agent. They’ll join the chat soon."
+        user_history.append({"user": user_message, "bot": bot_response})
+        return jsonify({"response": bot_response})
+
+    # Route to agent if in agent chat mode
+    if user_agent_chat["is_agent_chat"]:
+        message_to_agent = f"[{user_id}] {user_message}"
+        send_telegram_message(TELEGRAM_AGENT_CHAT_ID, message_to_agent)
+        bot_response = "Message sent to agent. Please wait for their reply."
+        user_history.append({"user": user_message, "bot": bot_response})
+        return jsonify({"response": bot_response})
+
+    # Otherwise, use AI
+    response_text = sendtoAi(API_KEY, user_message, user_history)
+    try:
+        response_json = json.loads(response_text)
+        bot_response = response_json["response"]
+        user_history.append({"user": user_message, "bot": bot_response})
+        if len(user_history) > 10:
+            user_history.pop(0)
+    except json.JSONDecodeError:
+        bot_response = "Sorry, I couldn’t process that. How can I assist you?"
+        user_history.append({"user": user_message, "bot": bot_response})
 
     return jsonify({"response": bot_response})
+
+@app.route('/telegram_webhook', methods=['POST'])
+def telegram_webhook():
+    update = request.json
+    if "message" in update:
+        message = update["message"]
+        chat_id = str(message["chat"]["id"])
+        text = message["text"]
+
+        # Check if this is from the agent
+        if chat_id == TELEGRAM_AGENT_CHAT_ID:
+            # Extract user_id from agent's reply (e.g., "[user_abc123] Hi there")
+            try:
+                user_id_start = text.index("[") + 1
+                user_id_end = text.index("]")
+                user_id = text[user_id_start:user_id_end]
+                agent_reply = text[user_id_end + 1:].strip()
+
+                # Route reply to user's chat
+                if user_id in USER_HISTORIES:
+                    USER_HISTORIES[user_id].append({"user": "(agent)", "bot": agent_reply})
+                    # Notify user via their chat session
+                    if user_id in ACTIVE_CHATS:
+                        ACTIVE_CHATS[user_id].append({"response": f"Agent: {agent_reply}"})
+                    else:
+                        # If no active connection, store for next request (optional)
+                        print(f"Agent reply for {user_id} stored: {agent_reply}")
+            except ValueError:
+                send_telegram_message(TELEGRAM_AGENT_CHAT_ID, "Please include [user_id] in your reply, e.g., [user_abc123] Hi")
+    
+    return jsonify({"status": "ok"})
+
+BUSINESS_JSON = {
+  "business": {
+    "name": "Sunny Shades",
+    "description": "Your one-stop shop for premium sunglasses.",
+    "contact": {
+      "phone": "+1-800-555-1234",
+      "support_email": "support@sunnyshades.com",
+      "sales_email": "sales@sunnyshades.com"
+    },
+    "address": {
+      "street": "123 Sunshine Ave",
+      "city": "Sunnyville",
+      "state": "CA",
+      "zip": "90210",
+      "country": "USA"
+    },
+    "policies": {
+      "return": {
+        "timeframe": "30 days",
+        "conditions": "Items must be unused, in original packaging, with receipt.",
+        "process": "Contact support@sunnyshades.com to initiate a return."
+      },
+      "refund": {
+        "timeframe": "14 days after return approval",
+        "conditions": "Refunds issued to original payment method.",
+        "exceptions": "Custom orders are non-refundable."
+      },
+      "warranty": {
+        "duration": "1 year",
+        "coverage": "Manufacturing defects only."
+      }
+    },
+    "products": [
+      {
+        "id": "SS001",
+        "name": "Ray-Ban Aviator",
+        "category": "sports",
+        "price": 150.00,
+        "description": "Classic aviator style, ideal for sports and outdoor activities.",
+        "attributes": {
+          "color": "Black",
+          "lens_type": "Polarized",
+          "material": "Metal"
+        },
+        "stock": 25
+      },
+      {
+        "id": "SS002",
+        "name": "Gucci Round",
+        "category": "fashion",
+        "price": 300.00,
+        "description": "Trendy round frames for a stylish look.",
+        "attributes": {
+          "color": "Gold",
+          "lens_type": "Tinted",
+          "material": "Acetate"
+        },
+        "stock": 15
+      },
+      {
+        "id": "SS003",
+        "name": "Polaroid Classic",
+        "category": "budget",
+        "price": 50.00,
+        "description": "Affordable and reliable everyday sunglasses.",
+        "attributes": {
+          "color": "Matte Black",
+          "lens_type": "UV Protection",
+          "material": "Plastic"
+        },
+        "stock": 50
+      }
+    ],
+    "services": {
+      "appointments": {
+        "description": "In-store try-ons or consultations.",
+        "availability": "Monday-Friday, 10:00 AM - 6:00 PM PST",
+        "booking_process": "Provide preferred date and time; confirmation sent via email."
+      },
+      "support": {
+        "description": "Assistance with orders, returns, or repairs.",
+        "contact": "support@sunnyshades.com",
+        "response_time": "Within 24 hours"
+      }
+    }
+  }
+}
 
 if __name__ == '__main__':
     app.run(debug=False, host='0.0.0.0', port=int(os.environ.get("PORT", 8080)))
