@@ -1,7 +1,6 @@
 from flask import Flask, Response, request, jsonify
 from flask_cors import CORS
 import google.generativeai as genai
-import re
 import os
 import json
 import requests
@@ -10,7 +9,7 @@ from urllib.parse import urlparse
 import queue
 import time
 
-apiKey  = os.getenv("GOOGLE_API_KEY")
+apiKey = os.getenv("GOOGLE_API_KEY")
 USER_HISTORIES = {}  # {user_id: [{"user": "...", "bot": "..."}, ...]}
 USER_AGENT_CHATS = {}  # {user_id: {"is_agent_chat": bool, "telegram_chat_id": str}}
 ACTIVE_CHATS = {}
@@ -26,7 +25,6 @@ def send_telegram_message(chat_id, text):
     payload = {"chat_id": chat_id, "text": text}
     response = requests.post(url, json=payload)
     return response.status_code == 200
-
 
 def get_request_domain():
     """Extract the domain from Origin or Referer headers."""
@@ -79,13 +77,8 @@ def sendtoAi(prompt, history=None):
         
     )
 
-    
     response = model.generate_content(full_prompt)
-
-    
     return response.text
-
-
 
 @app.route('/chatbot.js', methods=['GET'])
 def chatbot_js():
@@ -155,6 +148,44 @@ def chatbot_js():
             toggleButton.style.display = 'block';
         });
 
+        let userId = null;
+        let eventSource = null;
+
+        function startAgentChat(userId) {
+            if (eventSource) eventSource.close(); // Close any existing connection
+            eventSource = new EventSource(`https://webai-production.up.railway.app/chatbot?userId=${userId}`);
+            const messagesDiv = document.getElementById('chatbot-messages');
+
+            eventSource.onmessage = function(event) {
+                const data = JSON.parse(event.data);
+                let botMessage = document.createElement('div');
+                botMessage.innerHTML = data.response;
+                botMessage.style.background = '#e9ecef';
+                botMessage.style.color = '#333';
+                botMessage.style.padding = '10px';
+                botMessage.style.margin = '5px';
+                botMessage.style.borderRadius = '10px';
+                botMessage.style.alignSelf = 'flex-start';
+                messagesDiv.appendChild(botMessage);
+                messagesDiv.scrollTop = messagesDiv.scrollHeight;
+            };
+
+            eventSource.onerror = function() {
+                console.error('SSE connection error');
+                eventSource.close();
+                let errorMessage = document.createElement('div');
+                errorMessage.innerHTML = 'Agent connection lost. Please try again.';
+                errorMessage.style.background = '#ffcccc';
+                errorMessage.style.color = '#333';
+                errorMessage.style.padding = '10px';
+                errorMessage.style.margin = '5px';
+                errorMessage.style.borderRadius = '10px';
+                errorMessage.style.alignSelf = 'flex-start';
+                messagesDiv.appendChild(errorMessage);
+                messagesDiv.scrollTop = messagesDiv.scrollHeight;
+            };
+        }
+
         function sendMessage() {
             let inputField = document.getElementById('chatbot-input');
             let message = inputField.value.trim();
@@ -184,17 +215,27 @@ def chatbot_js():
                 typingMessage.style.alignSelf = 'flex-start';
                 messagesDiv.appendChild(typingMessage);
                 messagesDiv.scrollTop = messagesDiv.scrollHeight;
-    
+
+                if (!userId) userId = 'user_' + Math.random().toString(36).substr(2, 9);
+
                 fetch('https://webai-production.up.railway.app/chatbot', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json'
                     },
-                    body: JSON.stringify({ message: message })
+                    body: JSON.stringify({ message: message, userId: userId })
                 })
-                .then(response => response.json())
+                .then(response => {
+                    if (message.toLowerCase().includes('talk to agent') || message.toLowerCase().includes('chat with agent')) {
+                        messagesDiv.removeChild(typingMessage);
+                        startAgentChat(userId);
+                        return Promise.resolve(); // Skip JSON parsing for SSE transition
+                    }
+                    return response.json();
+                })
                 .then(data => {
-                    messagesDiv.removeChild(typingMessage); // Remove typing indicator
+                    if (!data) return; // Skip if SSE started
+                    messagesDiv.removeChild(typingMessage);
                     let botMessage = document.createElement('div');
                     botMessage.innerHTML = data.response;
                     botMessage.style.background = '#e9ecef';
@@ -207,7 +248,7 @@ def chatbot_js():
                     messagesDiv.scrollTop = messagesDiv.scrollHeight;
                 })
                 .catch(error => {
-                    messagesDiv.removeChild(typingMessage); // Remove typing indicator on error
+                    messagesDiv.removeChild(typingMessage);
                     console.error('Error:', error);
                     let errorMessage = document.createElement('div');
                     errorMessage.innerHTML = 'Oops! Something went wrong.';
@@ -237,7 +278,7 @@ def chatbot():
         user_id = request.args.get('userId')
         if not user_id or user_id not in USER_AGENT_CHATS or not USER_AGENT_CHATS[user_id]["is_agent_chat"]:
             return jsonify({"error": "No active agent chat"}), 400
-        return Response(sse_stream(user_id), mimetype='text/event-stream')
+        return Response(sse_stream(user_id)(), mimetype='text/event-stream')
 
     data = request.json
     user_message = data.get('message', '').lower()
@@ -260,14 +301,14 @@ def chatbot():
         send_telegram_message(TELEGRAM_AGENT_CHAT_ID, message_to_agent)
         bot_response = "I’ve notified an agent. They’ll reply here soon."
         user_history.append({"user": user_message, "bot": bot_response})
-        return Response(sse_stream(user_id), mimetype='text/event-stream')
+        return Response(sse_stream(user_id)(), mimetype='text/event-stream')
 
     if user_agent_chat["is_agent_chat"]:
         message_to_agent = f"[{user_id}] {user_message}"
         send_telegram_message(TELEGRAM_AGENT_CHAT_ID, message_to_agent)
         bot_response = "Message sent to agent. Waiting for their reply..."
         user_history.append({"user": user_message, "bot": bot_response})
-        return Response(sse_stream(user_id), mimetype='text/event-stream')
+        return Response(sse_stream(user_id)(), mimetype='text/event-stream')
 
     # Otherwise, use AI
     bot_response = sendtoAi(user_message.lower(), user_history)
