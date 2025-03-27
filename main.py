@@ -234,20 +234,17 @@ def chatbot_js():
 @app.route('/chatbot', methods=['GET', 'POST'])
 def chatbot():
     if request.method == 'GET':
-        # Handle SSE stream for agent replies
         user_id = request.args.get('userId')
         if not user_id or user_id not in USER_AGENT_CHATS or not USER_AGENT_CHATS[user_id]["is_agent_chat"]:
             return jsonify({"error": "No active agent chat"}), 400
         return Response(sse_stream(user_id), mimetype='text/event-stream')
 
-    # Handle POST requests (user messages)
     data = request.json
     user_message = data.get('message', '').lower()
     user_id = data.get('userId', str(uuid.uuid4()))
     domain = get_request_domain()
     print(f"Chat request from user {user_id} at domain: {domain} - Message: {user_message}")
 
-    # Initialize user state
     if user_id not in USER_HISTORIES:
         USER_HISTORIES[user_id] = []
     if user_id not in USER_AGENT_CHATS:
@@ -256,7 +253,6 @@ def chatbot():
     user_history = USER_HISTORIES[user_id]
     user_agent_chat = USER_AGENT_CHATS[user_id]
 
-    # Check for agent chat request
     if "chat with agent" in user_message or "talk to agent" in user_message:
         user_agent_chat["is_agent_chat"] = True
         user_agent_chat["telegram_chat_id"] = TELEGRAM_AGENT_CHAT_ID
@@ -264,18 +260,14 @@ def chatbot():
         send_telegram_message(TELEGRAM_AGENT_CHAT_ID, message_to_agent)
         bot_response = "I’ve notified an agent. They’ll reply here soon."
         user_history.append({"user": user_message, "bot": bot_response})
-        # Start SSE stream
         return Response(sse_stream(user_id), mimetype='text/event-stream')
 
-    # Route to agent if in agent chat mode
     if user_agent_chat["is_agent_chat"]:
         message_to_agent = f"[{user_id}] {user_message}"
         send_telegram_message(TELEGRAM_AGENT_CHAT_ID, message_to_agent)
         bot_response = "Message sent to agent. Waiting for their reply..."
         user_history.append({"user": user_message, "bot": bot_response})
         return Response(sse_stream(user_id), mimetype='text/event-stream')
-
-    
 
     # Otherwise, use AI
     bot_response = sendtoAi(user_message.lower(), user_history)
