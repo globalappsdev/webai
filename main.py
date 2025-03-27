@@ -6,6 +6,9 @@ import os
 import json
 import requests
 import uuid
+from urllib.parse import urlparse
+import queue
+import time
 
 apiKey  = os.getenv("GOOGLE_API_KEY")
 USER_HISTORIES = {}  # {user_id: [{"user": "...", "bot": "..."}, ...]}
@@ -37,7 +40,23 @@ def get_request_domain():
         return f"{parsed.scheme}://{parsed.netloc}"  # e.g., "https://sunnyshades.com"
     
     return "Unknown"  # Fallback if neither header is present
-    
+
+def sse_stream(user_id):
+    """Generator for SSE stream."""
+    message_queue = ACTIVE_CHATS.get(user_id, queue.Queue())
+    ACTIVE_CHATS[user_id] = message_queue
+
+    def event_generator():
+        while True:
+            try:
+                message = message_queue.get(timeout=30)  # Wait for 30s before closing
+                yield f"data: {json.dumps(message)}\n\n"
+            except queue.Empty:
+                # Close connection if no messages for 30s
+                del ACTIVE_CHATS[user_id]
+                break
+
+    return event_generator
 
 def sendtoAi(prompt, history=None):
     # Configure Gemini
@@ -69,13 +88,19 @@ def sendtoAi(prompt, history=None):
 
 @app.route('/chatbot.js', methods=['GET'])
 def chatbot_js():
+    domain = get_request_domain()
+    print(f"Request to /chatbot.js from domain: {domain}")
     js_code = """
     (function() {
+        let userId = localStorage.getItem('chatbotUserId');
+        if (!userId) {
+            userId = 'user_' + Math.random().toString(36).substr(2, 9);
+            localStorage.setItem('chatbotUserId', userId);
+        }
         let existingContainer = document.getElementById('chatbot-container');
         if (existingContainer) {
             existingContainer.parentNode.removeChild(existingContainer);
         }
-
         var chatbotContainer = document.createElement('div');
         chatbotContainer.id = 'chatbot-container';
         chatbotContainer.style.position = 'fixed';
@@ -90,21 +115,18 @@ def chatbot_js():
         chatbotContainer.style.flexDirection = 'column';
         chatbotContainer.style.justifyContent = 'space-between';
         chatbotContainer.style.fontFamily = 'Arial, sans-serif';
-
         chatbotContainer.innerHTML = `
             <div id='chatbot-header' style='background: #007bff; color: white; padding: 15px; text-align: center; font-weight: bold; cursor: pointer; border-top-left-radius: 10px; border-top-right-radius: 10px; display: flex; justify-content: space-between;'>
-                <span>Chat with AI</span>
+                <span>Sunglasses Assistant</span>
                 <button id='close-chatbot' style='background: transparent; border: none; color: white; font-size: 16px; cursor: pointer;'>✕</button>
             </div>
             <div id='chatbot-messages' style='flex: 1; padding: 10px; overflow-y: auto; max-height: 400px;'></div>
             <div id='chatbot-input-area' style='display: flex; padding: 10px; border-top: 1px solid #ccc;'>
-                <input id='chatbot-input' type='text' placeholder='Type a message...' style='flex: 1; border: none; padding: 10px; border-radius: 5px;'>
+                <input id='chatbot-input' type='text' placeholder='Ask about sunglasses...' style='flex: 1; border: none; padding: 10px; border-radius: 5px;'>
                 <button id='send-message' style='background: #007bff; color: white; border: none; padding: 10px 15px; cursor: pointer; border-radius: 5px; margin-left: 5px;'>Send</button>
             </div>
         `;
-
         document.body.appendChild(chatbotContainer);
-
         var toggleButton = document.createElement('button');
         toggleButton.innerText = 'Chat 💬';
         toggleButton.id = 'chatbot-toggle';
@@ -119,7 +141,6 @@ def chatbot_js():
         toggleButton.style.cursor = 'pointer';
         toggleButton.style.boxShadow = '0 2px 5px rgba(0, 0, 0, 0.2)';
         document.body.appendChild(toggleButton);
-
         document.getElementById('chatbot-toggle').addEventListener('click', function() {
             if (chatbotContainer.style.display === 'none') {
                 chatbotContainer.style.display = 'flex';
@@ -129,18 +150,15 @@ def chatbot_js():
                 toggleButton.style.display = 'block';
             }
         });
-
         document.getElementById('close-chatbot').addEventListener('click', function() {
             chatbotContainer.style.display = 'none';
             toggleButton.style.display = 'block';
         });
-
         function sendMessage() {
             let inputField = document.getElementById('chatbot-input');
             let message = inputField.value.trim();
             if (message !== '') {
                 let messagesDiv = document.getElementById('chatbot-messages');
-
                 let userMessage = document.createElement('div');
                 userMessage.innerHTML = message;
                 userMessage.style.background = '#007bff';
@@ -150,10 +168,7 @@ def chatbot_js():
                 userMessage.style.borderRadius = '10px';
                 userMessage.style.alignSelf = 'flex-end';
                 messagesDiv.appendChild(userMessage);
-
                 inputField.value = '';
-
-                // Add typing indicator
                 let typingMessage = document.createElement('div');
                 typingMessage.innerHTML = 'Typing...';
                 typingMessage.style.background = '#e9ecef';
@@ -164,30 +179,50 @@ def chatbot_js():
                 typingMessage.style.alignSelf = 'flex-start';
                 messagesDiv.appendChild(typingMessage);
                 messagesDiv.scrollTop = messagesDiv.scrollHeight;
-    
-                fetch('https://webai-production.up.railway.app/chatbot', {
+
+                fetch('/chatbot', {
                     method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify({ message: message })
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ message: message, userId: userId })
                 })
-                .then(response => response.json())
-                .then(data => {
-                    messagesDiv.removeChild(typingMessage); // Remove typing indicator
-                    let botMessage = document.createElement('div');
-                    botMessage.innerHTML = data.response;
-                    botMessage.style.background = '#e9ecef';
-                    botMessage.style.color = '#333';
-                    botMessage.style.padding = '10px';
-                    botMessage.style.margin = '5px';
-                    botMessage.style.borderRadius = '10px';
-                    botMessage.style.alignSelf = 'flex-start';
-                    messagesDiv.appendChild(botMessage);
-                    messagesDiv.scrollTop = messagesDiv.scrollHeight;
+                .then(response => {
+                    if (response.headers.get('Content-Type') === 'text/event-stream') {
+                        const source = new EventSource(`/chatbot?userId=${userId}`);
+                        source.onmessage = function(event) {
+                            const data = JSON.parse(event.data);
+                            messagesDiv.removeChild(typingMessage);
+                            let botMessage = document.createElement('div');
+                            botMessage.innerHTML = data.response;
+                            botMessage.style.background = '#e9ecef';
+                            botMessage.style.color = '#333';
+                            botMessage.style.padding = '10px';
+                            botMessage.style.margin = '5px';
+                            botMessage.style.borderRadius = '10px';
+                            botMessage.style.alignSelf = 'flex-start';
+                            messagesDiv.appendChild(botMessage);
+                            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+                        };
+                        source.onerror = function() {
+                            source.close();
+                        };
+                    } else {
+                        response.json().then(data => {
+                            messagesDiv.removeChild(typingMessage);
+                            let botMessage = document.createElement('div');
+                            botMessage.innerHTML = data.response;
+                            botMessage.style.background = '#e9ecef';
+                            botMessage.style.color = '#333';
+                            botMessage.style.padding = '10px';
+                            botMessage.style.margin = '5px';
+                            botMessage.style.borderRadius = '10px';
+                            botMessage.style.alignSelf = 'flex-start';
+                            messagesDiv.appendChild(botMessage);
+                            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+                        });
+                    }
                 })
                 .catch(error => {
-                    messagesDiv.removeChild(typingMessage); // Remove typing indicator on error
+                    messagesDiv.removeChild(typingMessage);
                     console.error('Error:', error);
                     let errorMessage = document.createElement('div');
                     errorMessage.innerHTML = 'Oops! Something went wrong.';
@@ -202,7 +237,6 @@ def chatbot_js():
                 });
             }
         }
-
         document.getElementById('send-message').addEventListener('click', sendMessage);
         document.getElementById('chatbot-input').addEventListener('keypress', function(event) {
             if (event.key === 'Enter') sendMessage();
@@ -211,15 +245,23 @@ def chatbot_js():
     """
     return Response(js_code, mimetype='application/javascript')
 
-@app.route('/chatbot', methods=['POST'])
+@app.route('/chatbot', methods=['GET', 'POST'])
 def chatbot():
+    if request.method == 'GET':
+        # Handle SSE stream for agent replies
+        user_id = request.args.get('userId')
+        if not user_id or user_id not in USER_AGENT_CHATS or not USER_AGENT_CHATS[user_id]["is_agent_chat"]:
+            return jsonify({"error": "No active agent chat"}), 400
+        return Response(sse_stream(user_id), mimetype='text/event-stream')
+
+    # Handle POST requests (user messages)
     data = request.json
     user_message = data.get('message', '').lower()
     user_id = data.get('userId', str(uuid.uuid4()))
     domain = get_request_domain()
     print(f"Chat request from user {user_id} at domain: {domain} - Message: {user_message}")
 
-    # Initialize user history and agent chat state
+    # Initialize user state
     if user_id not in USER_HISTORIES:
         USER_HISTORIES[user_id] = []
     if user_id not in USER_AGENT_CHATS:
@@ -228,23 +270,26 @@ def chatbot():
     user_history = USER_HISTORIES[user_id]
     user_agent_chat = USER_AGENT_CHATS[user_id]
 
-    # Check if user wants to chat with agent
+    # Check for agent chat request
     if "chat with agent" in user_message or "talk to agent" in user_message:
         user_agent_chat["is_agent_chat"] = True
         user_agent_chat["telegram_chat_id"] = TELEGRAM_AGENT_CHAT_ID
         message_to_agent = f"[{user_id}] User requested agent chat: {user_message}"
         send_telegram_message(TELEGRAM_AGENT_CHAT_ID, message_to_agent)
-        bot_response = "I’ve notified an agent. They’ll join the chat soon."
+        bot_response = "I’ve notified an agent. They’ll reply here soon."
         user_history.append({"user": user_message, "bot": bot_response})
-        return jsonify({"response": bot_response})
+        # Start SSE stream
+        return Response(sse_stream(user_id), mimetype='text/event-stream')
 
     # Route to agent if in agent chat mode
     if user_agent_chat["is_agent_chat"]:
         message_to_agent = f"[{user_id}] {user_message}"
         send_telegram_message(TELEGRAM_AGENT_CHAT_ID, message_to_agent)
-        bot_response = "Message sent to agent. Please wait for their reply."
+        bot_response = "Message sent to agent. Waiting for their reply..."
         user_history.append({"user": user_message, "bot": bot_response})
-        return jsonify({"response": bot_response})
+        return Response(sse_stream(user_id), mimetype='text/event-stream')
+
+    
 
     # Otherwise, use AI
     bot_response = sendtoAi(user_message.lower(), user_history)
@@ -264,7 +309,6 @@ def telegram_webhook():
 
         # Check if this is from the agent
         if chat_id == TELEGRAM_AGENT_CHAT_ID:
-            # Extract user_id from agent's reply (e.g., "[user_abc123] Hi there")
             try:
                 user_id_start = text.index("[") + 1
                 user_id_end = text.index("]")
@@ -274,11 +318,9 @@ def telegram_webhook():
                 # Route reply to user's chat
                 if user_id in USER_HISTORIES:
                     USER_HISTORIES[user_id].append({"user": "(agent)", "bot": agent_reply})
-                    # Notify user via their chat session
                     if user_id in ACTIVE_CHATS:
-                        ACTIVE_CHATS[user_id].append({"response": f"Agent: {agent_reply}"})
+                        ACTIVE_CHATS[user_id].put({"response": f"Agent: {agent_reply}"})
                     else:
-                        # If no active connection, store for next request (optional)
                         print(f"Agent reply for {user_id} stored: {agent_reply}")
             except ValueError:
                 send_telegram_message(TELEGRAM_AGENT_CHAT_ID, "Please include [user_id] in your reply, e.g., [user_abc123] Hi")
