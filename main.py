@@ -12,8 +12,8 @@ USER_HISTORIES = {}  # {user_id: [{"user": "...", "bot": "..."}, ...]}
 USER_AGENT_CHATS = {}  # {user_id: {"is_agent_chat": bool, "telegram_chat_id": str}}
 ACTIVE_CHATS = {}
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "your_telegram_bot_token")
-TELEGRAM_AGENT_CHAT_ID = os.getenv("TELEGRAM_AGENT_CHAT_ID", "your_agent_chat_id")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_AGENT_CHAT_ID = os.getenv("TELEGRAM_AGENT_CHAT_ID")
 
 app = Flask(__name__)
 CORS(app)
